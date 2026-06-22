@@ -1,0 +1,29 @@
+# local-fugu configuration
+# Switch backend by setting `backend: ollama` or `backend: vllm`
+
+backend: ollama  # "ollama" | "vllm"
+
+ollama:
+  base_url: "http://localhost:11434/v1"
+  api_key: "ollama"
+
+vllm:
+  base_url: "http://localhost:8000/v1"
+  api_key: "vllm"
+
+# Agent pool — maps agent role names to model identifiers.
+# The Conductor references these by name in workflows.
+# Add/remove agents freely; Conductor prompt lists available roles.
+agents:
+  conductor: "qwen3:8b"      # Orchestrator — generates workflows (not in pool)
+  coder:     "qwen3:32b"     # Primary implementer; use your merged model here
+  reviewer:  "qwen3:14b"     # Critic / verifier
+  planner:   "qwen3:8b"      # High-level decomposition (optional, saves VRAM)
+  # specialist: "deepseek-coder:33b"  # Uncomment to add a domain-specific agent
+
+pipeline:
+  max_parallel_steps: 4       # Max concurrent agent calls (asyncio semaphore)
+  temperature:
+    conductor: 0.4            # Slightly higher for creative workflow generation
+    default:   0.2            # Applied to all pool agents unless overridden
+  timeout_seconds: 180        # Per-agent call timeout
