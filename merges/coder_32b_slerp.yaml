@@ -1,0 +1,29 @@
+# Coder model: SLERP merge (alternative to DARE-TIES)
+#
+# Strategy: SLERP (Spherical Linear Interpolation)
+#   - Smooth interpolation in the parameter space
+#   - Works well when both models have the SAME architecture and base
+#   - Simpler than DARE-TIES; good starting point before tuning
+#   - t=0.0 → pure base model; t=1.0 → pure donor model
+#
+# Recipe: 40% Qwen3-32B (reasoning) + 60% Qwen2.5-Coder (coding execution)
+# Tune `t` based on swe-bench scores:
+#   - Higher t → more coding-focused (better patch generation, less planning)
+#   - Lower  t → more reasoning-focused (better issue analysis, less syntax)
+#
+# Usage:
+#   mergekit-merge merges/coder_32b_slerp.yaml --out-path ./models/coder-32b-slerp
+
+merge_method: slerp
+
+base_model:
+  model: Qwen/Qwen3-32B
+
+models:
+  - model: Qwen/Qwen3-32B
+  - model: Qwen/Qwen2.5-Coder-32B-Instruct
+
+parameters:
+  t: 0.6     # Lean toward Qwen2.5-Coder; try 0.4–0.7 range
+
+dtype: bfloat16

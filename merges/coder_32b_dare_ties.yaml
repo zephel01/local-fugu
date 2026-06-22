@@ -1,0 +1,44 @@
+# Coder model: DARE-TIES merge
+# Target: strong coding model for the `coder` agent (fits RTX 5090 32GB in Q4/Q6)
+#
+# Strategy: DARE-TIES
+#   - DARE  (Drop And REscale): sparsifies task vectors to reduce interference
+#   - TIES  (Trim, Elect Sign, Merge): resolves sign conflicts between models
+#   Best for merging models from the same base but different fine-tune focuses.
+#
+# Base: Qwen3-32B (strong general reasoning)
+# + Qwen2.5-Coder-32B-Instruct (SOTA coding)
+# → Expected: general reasoning + coding execution strength
+#
+# Usage:
+#   pip install mergekit
+#   mergekit-merge merges/coder_32b_dare_ties.yaml --out-path ./models/coder-32b-merged
+
+merge_method: dare_ties
+
+base_model:
+  model: Qwen/Qwen3-32B
+
+models:
+  - model: Qwen/Qwen3-32B
+    parameters:
+      weight: 0.5
+      density: 0.7        # Keep 70% of task vector — reduce if merge is noisy
+
+  - model: Qwen/Qwen2.5-Coder-32B-Instruct
+    parameters:
+      weight: 0.5
+      density: 0.7
+
+parameters:
+  normalize: true
+  int8_mask: true         # Use int8 for sign election (memory efficient)
+
+dtype: bfloat16
+
+# Optional: add a third model for extra coding diversity
+# Uncomment and adjust weights to sum to 1.0
+#  - model: deepseek-ai/DeepSeek-Coder-V2-Instruct
+#    parameters:
+#      weight: 0.2
+#      density: 0.6

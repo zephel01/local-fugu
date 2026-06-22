@@ -1,0 +1,32 @@
+# Reviewer model: DARE-TIES merge (14B — low VRAM, runs alongside 32B coder)
+#
+# Goal: strong at code review, bug detection, test-case reasoning
+# Base: Qwen3-14B (reasoning backbone)
+# + Qwen2.5-Coder-14B-Instruct (code understanding)
+#
+# 14B fits comfortably in ~10GB VRAM (Q4_K_M), leaving room for the 32B coder.
+#
+# Usage:
+#   mergekit-merge merges/reviewer_14b.yaml --out-path ./models/reviewer-14b-merged
+
+merge_method: dare_ties
+
+base_model:
+  model: Qwen/Qwen3-14B
+
+models:
+  - model: Qwen/Qwen3-14B
+    parameters:
+      weight: 0.45
+      density: 0.7
+
+  - model: Qwen/Qwen2.5-Coder-14B-Instruct
+    parameters:
+      weight: 0.55
+      density: 0.7
+
+parameters:
+  normalize: true
+  int8_mask: true
+
+dtype: bfloat16
