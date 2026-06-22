@@ -36,11 +36,11 @@ if [[ "$MODE" == "skip" ]]; then
 elif [[ "$MODE" == "merged" ]]; then
     echo "  Downloading HuggingFace base models for mergekit..."
     pip install huggingface_hub --break-system-packages -q
-    huggingface-cli download Qwen/Qwen3-32B               --local-dir models/Qwen3-32B
-    huggingface-cli download Qwen/Qwen2.5-Coder-32B-Instruct \
+    hf download Qwen/Qwen3-32B               --local-dir models/Qwen3-32B
+    hf download Qwen/Qwen2.5-Coder-32B-Instruct \
         --local-dir models/Qwen2.5-Coder-32B-Instruct
-    huggingface-cli download Qwen/Qwen3-14B               --local-dir models/Qwen3-14B
-    huggingface-cli download Qwen/Qwen2.5-Coder-14B-Instruct \
+    hf download Qwen/Qwen3-14B               --local-dir models/Qwen3-14B
+    hf download Qwen/Qwen2.5-Coder-14B-Instruct \
         --local-dir models/Qwen2.5-Coder-14B-Instruct
     echo "  Next: bash merges/run_merge.sh merges/coder_32b_dare_ties.yaml"
 

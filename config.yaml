@@ -24,20 +24,28 @@ vllm:
 # reviewer      qwen2.5-coder:14b              9 GB   —          code-understanding specialist (already downloaded)
 # planner       qwen3.5:4b                     3.4 GB  —          ultra-light decomposer (already downloaded)
 #
-# ── Why qwen3.6:27b-coding-nvfp4 over qwen3-coder:30b ──────────────────────
-#   qwen3-coder:30b         SWE-bench Verified: ~64%   18 GB
-#   qwen3.6:27b-coding-nvfp4  SWE-bench Verified: 77.2%  19 GB  ← 13pt better
-#   RTX 5090 has native FP4 tensor cores (Blackwell GB202) → ~5200 tok/s prefill
+# ── Why qwen3.6:27b over qwen3-coder:30b ────────────────────────────────────
+#   qwen3-coder:30b   SWE-bench Verified: ~64%   18 GB
+#   qwen3.6:27b       SWE-bench Verified: 77.2%  17 GB  ← 13pt better, already downloaded
+#
+# ── Format note ──────────────────────────────────────────────────────────────
+#   nvfp4 variants (e.g. qwen3.6:27b-coding-nvfp4) → Mac / Apple Silicon MLX only
+#   CUDA (Ubuntu / Windows WSL2 / RTX 5090) → use standard Q4_K_M GGUF (no suffix)
+#
+# ── ⚠️  CUDA version warning ────────────────────────────────────────────────
+#   CUDA 13.2 has a known bug producing gibberish on Qwen 3.6 (as of Apr 2026)
+#   Use CUDA 13.1 or CUDA 12.x — NVIDIA is working on a fix
 #
 # ── Alternatives / experiments ───────────────────────────────────────────────
-#   coder: "qwen3.6:35b-a3b-coding-nvfp4"   # 21 GB MoE, 198 tok/s, fast iteration
-#   coder: "qwen3-coder:30b"                 # 18 GB, 64% SWE-bench (fallback)
-#   reviewer: "devstral-small-2:24b-instruct-2512-q4_K_M"
-#     # ~14 GB, purpose-built coding agent (Mistral × All Hands AI)
-#     # → ollama pull devstral-small-2:24b-instruct-2512-q4_K_M
+#   coder (quality upgrade): pull qwen3.6:27b-q6_k  (~22.5 GB, fits 32 GB, ~50 tok/s)
+#   coder (speed):           qwen3.6:35b-a3b-q4_K_M (MoE 3B active, 198 tok/s)
+#   coder (Mac):             qwen3.6:27b-coding-nvfp4 (MLX format)
+#   coder (fallback):        qwen3-coder:30b (64% SWE-bench, CUDA safe)
+#   reviewer (upgrade):      devstral-small-2:24b-instruct-2512-q4_K_M
+#     → ollama pull devstral-small-2:24b-instruct-2512-q4_K_M
 agents:
   conductor: "qwen3.5:9b"
-  coder:     "qwen3.6:27b-coding-nvfp4"
+  coder:     "qwen3.6:27b"               # Q4_K_M, CUDA safe (nvfp4 variant is Mac/MLX only)
   reviewer:  "qwen2.5-coder:14b"
   planner:   "qwen3.5:4b"
 
