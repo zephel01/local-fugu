@@ -44,10 +44,10 @@ vllm:
 #   reviewer (upgrade):      devstral-small-2:24b-instruct-2512-q4_K_M
 #     → ollama pull devstral-small-2:24b-instruct-2512-q4_K_M
 agents:
-  conductor: "qwen3.5:9b"
-  coder:     "qwen3.6:27b"               # Q4_K_M, CUDA safe (nvfp4 variant is Mac/MLX only)
-  reviewer:  "qwen2.5-coder:14b"
-  planner:   "qwen3.5:4b"
+  conductor: "qwen2.5-coder:7b"                          # 4.7 GB — lightweight planner
+  coder:     "qwen3.6:27b"                               # 17 GB  — 77.2% SWE-bench
+  reviewer:  "devstral-small-2:24b-instruct-2512-q4_K_M" # 14 GB  — purpose-built coding agent
+  planner:   "gemma4:e2b"                                # 7.2 GB — ultra-light decomposer
 
 pipeline:
   max_parallel_steps: 2       # coder(19GB) + reviewer(9GB) = 28GB; safe within 32GB
