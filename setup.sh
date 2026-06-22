@@ -21,10 +21,25 @@ echo "=== local-fugu setup (mode: $MODE) ==="
 # ── 1. Python deps ─────────────────────────────────────────────────────────
 echo ""
 echo "[1/3] Installing Python dependencies..."
-pip install openai pyyaml --break-system-packages -q
-pip install datasets --break-system-packages -q \
-    || echo "  Warning: datasets install failed (needed for SWE-Bench eval)"
+
+# Create venv if not already inside one
+VENV_DIR=".venv"
+if [[ -z "${VIRTUAL_ENV:-}" ]]; then
+    if [[ ! -d "$VENV_DIR" ]]; then
+        echo "  Creating virtualenv at $VENV_DIR ..."
+        python3 -m venv "$VENV_DIR"
+    fi
+    # shellcheck disable=SC1091
+    source "$VENV_DIR/bin/activate"
+    echo "  Activated: $VENV_DIR"
+fi
+
+pip install -q openai pyyaml
+pip install -q datasets || echo "  Warning: datasets install failed (needed for SWE-Bench eval)"
 echo "  Done"
+echo ""
+echo "  ★ To activate the venv in future sessions:"
+echo "    source $VENV_DIR/bin/activate"
 
 # ── 2. Models ──────────────────────────────────────────────────────────────
 echo ""
