@@ -38,6 +38,13 @@ class BaseAgent:
         return temps.get(self.role, temps.get("default", 0.2))
 
     def _chat(self, user: str) -> str:
+        # keep_alive=0: tell Ollama to unload the model immediately after this
+        # request, freeing RAM before the next model loads.
+        # Only sent when backend is ollama (vLLM ignores unknown extra fields).
+        extra: dict = {}
+        if self.config.get("backend") == "ollama":
+            extra["keep_alive"] = 0
+
         resp = self.client.chat.completions.create(
             model=self.model,
             messages=[
@@ -46,5 +53,6 @@ class BaseAgent:
             ],
             temperature=self._temperature(),
             timeout=self.pipeline.get("timeout_seconds", 180),
+            extra_body=extra or None,
         )
         return resp.choices[0].message.content or ""

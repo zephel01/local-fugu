@@ -38,6 +38,10 @@ class ConductorAgent:
 
     def plan(self, user_query: str) -> dict[str, Any]:
         """Return a workflow dict: {goal, workflow: [{id, agent, subtask, access_list}]}"""
+        extra: dict = {}
+        if self.config.get("backend") == "ollama":
+            extra["keep_alive"] = 0
+
         resp = self.client.chat.completions.create(
             model=self.model,
             messages=[
@@ -46,6 +50,7 @@ class ConductorAgent:
             ],
             temperature=self.temperature,
             timeout=self.timeout,
+            extra_body=extra or None,
         )
         raw = resp.choices[0].message.content or ""
         return self._parse_json(raw)

@@ -116,13 +116,25 @@ class WorkflowExecutor:
             print(f"  [Step {step_id}] {agent_role} ← {subtask[:60]}…")
             t0 = time.perf_counter()
 
-            # Run synchronous agent call in thread pool to avoid blocking event loop
-            output = await asyncio.get_event_loop().run_in_executor(
-                None,
-                self.pool[agent_role].run,
-                subtask,
-                context or None,
-            )
+            # Run with retry — model-load failures (500) can happen when a previous
+            # model is still being unloaded from RAM. Wait and retry up to 3 times.
+            max_attempts = 3
+            for attempt in range(1, max_attempts + 1):
+                try:
+                    output = await asyncio.get_event_loop().run_in_executor(
+                        None,
+                        self.pool[agent_role].run,
+                        subtask,
+                        context or None,
+                    )
+                    break
+                except Exception as e:
+                    if attempt == max_attempts:
+                        raise
+                    wait = 10 * attempt
+                    print(f"  [Step {step_id}] attempt {attempt} failed ({e.__class__.__name__}), "
+                          f"retrying in {wait}s…")
+                    await asyncio.sleep(wait)
 
             duration = time.perf_counter() - t0
             print(f"  [Step {step_id}] done in {duration:.1f}s")
