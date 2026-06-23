@@ -33,9 +33,76 @@ from typing import Any
 # Add repo root to path so we can import pipeline
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from pipeline import FuguPipeline
+from pipeline import FuguPipeline, WorkflowExecutor, WorkflowResult
+from agents.base import load_config
+from agents import build_pool
 from eval.swe_prompt import format_query, format_conductor_hint
 from eval.extract_patch import extract, is_valid_patch
+
+
+# ── Fixed SWE-bench workflow (bypasses Conductor) ─────────────────────────────
+
+def run_fixed_workflow(instance: dict, config: dict) -> WorkflowResult:
+    """
+    Run a hardcoded planner→coder→reviewer workflow without calling the Conductor.
+    This is more reliable for SWE-bench because:
+    - The workflow is always the same (no need for dynamic planning)
+    - Avoids Conductor failures on long problem statements
+    - Saves ~1-5min per instance on conductor retries
+    """
+    import asyncio
+
+    query = format_query(instance)
+    repo = instance.get("repo", "unknown")
+
+    fixed_workflow = [
+        {
+            "id": 1,
+            "agent": "planner",
+            "subtask": (
+                f"You are working on the {repo} repository.\n\n"
+                "Your job: carefully read the issue below and identify:\n"
+                "1. The exact file path(s) in the repository that need to be changed\n"
+                "2. The root cause of the bug\n"
+                "3. The minimal change needed\n\n"
+                "Be specific about file paths — they will be used to generate a git patch.\n\n"
+                f"{query}"
+            ),
+            "access_list": [],
+        },
+        {
+            "id": 2,
+            "agent": "coder",
+            "subtask": (
+                "Using the file paths and analysis from the planner, implement the fix "
+                "as a valid unified diff (git patch).\n\n"
+                "STRICT requirements:\n"
+                "- Use REAL file paths from the planner (never placeholders like 'path/to/file')\n"
+                "- Format: `--- a/actual/path.py` and `+++ b/actual/path.py`\n"
+                "- Include correct @@ line numbers and context lines\n"
+                "- Output ONLY the patch in a ```diff ... ``` block\n\n"
+                f"Original issue for reference:\n{query}"
+            ),
+            "access_list": [1],
+        },
+        {
+            "id": 3,
+            "agent": "reviewer",
+            "subtask": (
+                "Review the patch from the coder. Check:\n"
+                "1. File paths in `--- a/...` and `+++ b/...` are real paths (not placeholders)\n"
+                "2. The patch addresses the root cause described in the issue\n"
+                "3. The diff format is valid (correct @@ headers, context lines)\n\n"
+                "If the patch looks valid, output it unchanged in a ```diff ... ``` block.\n"
+                "If it has placeholder paths, correct them using the planner's file paths."
+            ),
+            "access_list": [2],
+        },
+    ]
+
+    executor = WorkflowExecutor(config)
+    step_results = asyncio.run(executor.execute(fixed_workflow))
+    return WorkflowResult(goal=f"Fix: {instance.get('instance_id', '')}", step_results=step_results)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -65,16 +132,26 @@ def load_existing_ids(path: str) -> set[str]:
     return ids
 
 
-def run_instance(pipeline: FuguPipeline, instance: dict, log_dir: str = "results/swebench") -> dict:
+def run_instance(
+    instance: dict,
+    log_dir: str = "results/swebench",
+    pipeline: FuguPipeline | None = None,
+    config: dict | None = None,
+    bypass_conductor: bool = True,
+) -> dict:
     """Run the pipeline on one SWE-Bench instance. Returns a prediction dict."""
     iid = instance["instance_id"]
-    query = format_query(instance)
-    hint = format_conductor_hint(instance)
-    full_query = f"{hint}\n\n{query}"
 
     t0 = time.time()
     try:
-        result = pipeline.run(full_query)
+        if bypass_conductor and config is not None:
+            result = run_fixed_workflow(instance, config)
+        else:
+            assert pipeline is not None
+            query = format_query(instance)
+            hint = format_conductor_hint(instance)
+            result = pipeline.run(f"{hint}\n\n{query}")
+
         elapsed = time.time() - t0
         all_output = "\n\n".join(s.output for s in result.step_results)
         patch = extract(all_output)
@@ -202,6 +279,10 @@ def main() -> None:
     parser.add_argument("--resume", action="store_true", help="Skip already-saved instances")
     parser.add_argument("--score-only", action="store_true", help="Only score existing predictions")
     parser.add_argument("--stats-only", action="store_true", help="Print extraction stats, no Docker")
+    parser.add_argument(
+        "--use-conductor", action="store_true",
+        help="Use Conductor for dynamic workflow (default: bypass with fixed planner→coder→reviewer)"
+    )
     args = parser.parse_args()
 
     if args.stats_only:
@@ -229,10 +310,18 @@ def main() -> None:
         to_run = to_run[: args.limit]
     print(f"  Running: {len(to_run)} instances\n")
 
-    # Init pipeline
-    pipeline = FuguPipeline(config_path=args.config)
+    bypass_conductor = not args.use_conductor
+    if bypass_conductor:
+        print("[Mode] Fixed workflow (planner→coder→reviewer) — Conductor bypassed\n")
+        config = load_config(args.config)
+        pipeline = None
+    else:
+        print("[Mode] Dynamic workflow via Conductor\n")
+        config = None
+        pipeline = FuguPipeline(config_path=args.config)
 
     # Run
+    log_dir = f"results/swebench/{Path(args.output).stem}"
     Path(args.output).parent.mkdir(parents=True, exist_ok=True)
     t_start = time.perf_counter()
 
@@ -242,7 +331,13 @@ def main() -> None:
             print(f"[{idx}/{len(to_run)}] {iid}")
             t0 = time.perf_counter()
 
-            pred = run_instance(pipeline, instance, log_dir=f"results/swebench/{Path(args.output).stem}")
+            pred = run_instance(
+                instance,
+                log_dir=log_dir,
+                pipeline=pipeline,
+                config=config,
+                bypass_conductor=bypass_conductor,
+            )
             out_f.write(json.dumps(pred, ensure_ascii=False) + "\n")
             out_f.flush()
 
