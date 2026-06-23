@@ -46,6 +46,7 @@ def run_fixed_workflow(
     instance: dict,
     config: dict,
     use_repo_context: bool = True,
+    exec_repair: bool = False,
 ) -> WorkflowResult:
     """
     Run planner→coder→reviewer without the Conductor.
@@ -120,52 +121,185 @@ def run_fixed_workflow(
         steps.append(StepResult(id=1, agent="planner", subtask=planner_subtask, output=planner_output, duration_s=dur1))
 
         # ── Read actual file content ──────────────────────────────────────────
+        # Priority 1: derive from FAIL_TO_PASS test paths (reliable)
+        # Priority 2: parse planner output (heuristic)
         file_content_section = ""
         if repo_dir is not None:
             try:
-                from eval.repo_context import extract_file_paths, read_files
-                file_paths = extract_file_paths(planner_output, repo_dir, pkg_name)
+                from eval.repo_context import (
+                    paths_from_tests, extract_file_paths, read_files,
+                )
+                test_paths = paths_from_tests(instance, repo_dir)
+                planner_paths = extract_file_paths(planner_output, repo_dir, pkg_name)
+
+                # v4 improvement 2: locate the DEFINING source file via symbols
+                # from the issue + failing tests (finds e.g. column.py that the
+                # test paths / planner missed).
+                from eval.repo_focus import (
+                    symbols_for_localization, locate_source_by_symbols, parse_fail_to_pass,
+                    scope_dirs_from_tests,
+                )
+                _ft = parse_fail_to_pass(instance.get("FAIL_TO_PASS", []))
+                _testnames = set().union(*_ft.values()) if _ft else set()
+                _syms = symbols_for_localization(
+                    instance.get("problem_statement", ""), planner_output, " ".join(_testnames))
+                # v5: restrict to the failing test's sub-package + require the
+                # file's basename to match a symbol (precision over recall — the
+                # broad search added wrong files and caused a 0/3 regression).
+                _scope = scope_dirs_from_tests(instance.get("FAIL_TO_PASS", []))
+                located_paths = locate_source_by_symbols(
+                    repo_dir, pkg_name, _syms, scope_dirs=_scope, require_basename_match=True)
+                if located_paths:
+                    print(f"  [repo] Paths from symbols (scoped): {located_paths}")
+
+                # Merge: symbol-located source first (most precise), then
+                # test-derived, then planner (deduped).
+                seen_paths: set[str] = set()
+                file_paths: list[str] = []
+                for p in located_paths + test_paths + planner_paths:
+                    if p not in seen_paths:
+                        seen_paths.add(p)
+                        file_paths.append(p)
+                file_paths = file_paths[:6]  # cap total
+
+                if test_paths:
+                    print(f"  [repo] Paths from FAIL_TO_PASS: {test_paths}")
+                if planner_paths:
+                    print(f"  [repo] Paths from planner: {planner_paths}")
+                if not file_paths:
+                    print("  [repo] No matching files found — coder will infer paths")
+
                 if file_paths:
-                    print(f"  [repo] Reading: {file_paths}")
+                    # Separate source files (for SEARCH/REPLACE) from test files (context only)
+                    source_files = [p for p in file_paths if "/tests/" not in p and not p.endswith("_test.py")]
+                    test_files = [p for p in file_paths if "/tests/" in p or p.endswith("_test.py")]
+                    # v3: AST-compress source to only the relevant defs (keeps the
+                    # coder context small so the retry loop cannot overflow the
+                    # local model's window). Excerpts are VERBATIM so SEARCH still
+                    # matches the real file. Fail-safe: full (capped) file on miss.
+                    from eval.repo_focus import focus_source_files, identifiers_from_text
+                    _hints = identifiers_from_text(planner_output) | set(_syms)
+                    _src = (source_files if source_files else file_paths)[:2]  # v5: concentrate budget
+                    _focus, _stats = focus_source_files(repo_dir, _src, _hints)
+                    print(f"  [focus] source {_stats['orig_chars']}->{_stats['out_chars']} chars "
+                          f"(~{_stats['est_tokens']} tok); modes={[f['mode'] for f in _stats['files']]}")
                     file_content_section = (
-                        "\n\n## Actual file content from repository\n"
-                        + read_files(repo_dir, file_paths)
+                        "\n\n## Source files to fix (SEARCH/REPLACE these; excerpts are verbatim)\n"
+                        + _focus
                     )
-                else:
-                    print("  [repo] No matching files found in planner output")
+                    # v4 improvement 1: show the EXACT failing test functions
+                    # (what the fix must satisfy) rather than dumping whole tests.
+                    from eval.repo_focus import failing_tests_section
+                    _ftsec = failing_tests_section(repo_dir, instance.get("FAIL_TO_PASS", []))
+                    if _ftsec:
+                        file_content_section += _ftsec
+                    elif test_files and source_files:
+                        file_content_section += (
+                            "\n\n## Test files (READ-ONLY — do NOT modify these)\n"
+                            + read_files(repo_dir, test_files, max_chars=3000)
+                        )
             except Exception as e:
                 print(f"  [repo] File read failed: {e}")
 
-        # ── Step 2: Coder ─────────────────────────────────────────────────────
-        coder_subtask = (
-            "Using the planner's analysis, implement the fix as a valid unified diff.\n\n"
-            "STRICT requirements:\n"
-            "- Use the EXACT file paths identified by the planner\n"
-            "- `--- a/real/path.py` and `+++ b/real/path.py` (no placeholders)\n"
-            "- Context lines MUST match the actual file content exactly\n"
-            "- @@ line numbers must be correct\n"
-            "- Output ONLY a ```diff ... ``` block\n"
-            + file_content_section
+        # ── Step 2: Coder (v2: SEARCH/REPLACE + verify-and-retry loop) ────────
+        from eval.swe_prompt import coder_instructions, coder_retry_instructions
+        from eval.patch_utils import (
+            generate_patch_with_retry, source_files_only, test_to_source_candidates,
         )
 
-        context1 = [{"id": 1, "agent": "planner", "output": planner_output}]
-        print(f"  [Step 2] coder ← {coder_subtask[:60]}…")
-        t0 = time.perf_counter()
-        coder_output = await asyncio.get_event_loop().run_in_executor(
-            None, pool["coder"].run, coder_subtask, context1
-        )
-        dur2 = time.perf_counter() - t0
-        print(f"  [Step 2] done in {dur2:.1f}s")
-        steps.append(StepResult(id=2, agent="coder", subtask=coder_subtask, output=coder_output, duration_s=dur2))
+        from eval.repo_focus import clip as _clip
+        _planner_brief = _clip(planner_output, 1500)  # bounded; re-sent each retry
+        context1 = [{"id": 1, "agent": "planner", "output": _planner_brief}]
 
-        # ── Step 3: Reviewer ──────────────────────────────────────────────────
+        # Localize SOURCE files (never edit tests); fall back from test paths.
+        src_for_edit: list[str] = []
+        try:
+            src_for_edit = source_files_only(file_paths)[:2]  # v5: top-2 only
+            if not src_for_edit and repo_dir is not None:
+                for tp in file_paths:
+                    for cand in test_to_source_candidates(tp):
+                        if (repo_dir / cand).exists():
+                            src_for_edit.append(cand)
+                            break
+        except NameError:
+            src_for_edit = []
+
+        precomputed_patch = ""
+        coder_output = ""
+        if repo_dir is not None and file_content_section and src_for_edit:
+            base_prompt = (
+                "Planner analysis:\n" + _planner_brief + "\n\n"
+                + coder_instructions() + file_content_section
+            )
+            _last = {"out": ""}
+
+            def _coder_fn(prompt: str) -> str:
+                out = pool["coder"].run(prompt, context1)
+                _last["out"] = out
+                return out
+
+            def _candidate(feedback):
+                # Re-run the validated SEARCH/REPLACE loop, optionally with the
+                # failing-test feedback from the previous execution appended.
+                bp = base_prompt if not feedback else (
+                    base_prompt
+                    + "\n\n## Your previous patch APPLIED but tests still FAILED — fix accordingly:\n"
+                    + feedback
+                )
+                return generate_patch_with_retry(
+                    _coder_fn, repo_dir, src_for_edit,
+                    base_prompt=bp,
+                    retry_feedback=coder_retry_instructions,
+                    max_retries=2,
+                ).patch
+
+            print(f"  [Step 2] coder{' + exec-repair' if exec_repair else ' (retry loop)'} on {src_for_edit}")
+            t0 = time.perf_counter()
+            if exec_repair:
+                # Execution-guided repair: apply candidate -> run failing tests in
+                # the SWE-bench Docker image -> feed the traceback back -> retry.
+                from eval.exec_repair import repair_patch, SWEBenchSingleInstanceRunner
+                runner = SWEBenchSingleInstanceRunner(instance)
+                rr = await asyncio.get_event_loop().run_in_executor(
+                    None, lambda: repair_patch(_candidate, runner, max_rounds=2))
+                precomputed_patch = rr.patch
+                _status = f"{rr.status} after {rr.rounds} round(s)"
+                print(f"  [repair] {'; '.join(rr.log)}")
+            else:
+                precomputed_patch = await asyncio.get_event_loop().run_in_executor(
+                    None, lambda: _candidate(None))
+                _status = "single-pass"
+            dur2 = time.perf_counter() - t0
+            coder_output = _last["out"]
+            print(f"  [Step 2] done in {dur2:.1f}s — {_status}")
+            steps.append(StepResult(id=2, agent="coder", subtask="(retry loop)", output=coder_output, duration_s=dur2))
+            steps.append(StepResult(id=99, agent="__patch__",
+                                    subtask=f"validated patch: {_status}",
+                                    output=precomputed_patch, duration_s=0.0))
+        else:
+            # No repo content — single best-effort SEARCH/REPLACE call.
+            coder_subtask = (
+                "Using the planner's analysis, implement the fix.\n\n"
+                + coder_instructions()
+            )
+            print(f"  [Step 2] coder (no-context) ← {coder_subtask[:50]}…")
+            t0 = time.perf_counter()
+            coder_output = await asyncio.get_event_loop().run_in_executor(
+                None, pool["coder"].run, coder_subtask, context1
+            )
+            dur2 = time.perf_counter() - t0
+            print(f"  [Step 2] done in {dur2:.1f}s")
+            steps.append(StepResult(id=2, agent="coder", subtask=coder_subtask, output=coder_output, duration_s=dur2))
+
+        # ── Step 3: Reviewer (lightweight — just checks logic) ────────────────
         reviewer_subtask = (
-            "Review the patch from the coder:\n"
-            "1. File paths in `--- a/...` headers must be real (not placeholders)\n"
-            "2. The fix must address the root cause\n"
-            "3. Diff format must be valid (correct @@ headers and context lines)\n\n"
-            "Output the verified patch in ```diff ... ``` block. "
-            "If paths look wrong, correct them using the planner's identified paths."
+            "Review the proposed fix from the coder.\n"
+            "1. Does it address the root cause described in the issue?\n"
+            "2. Could it break other tests?\n"
+            "3. Is it minimal (no unnecessary changes)?\n\n"
+            "If the fix looks correct, output it unchanged.\n"
+            "If you see a problem, output a corrected SEARCH/REPLACE block instead.\n"
+            "Do NOT change the format — keep SEARCH/REPLACE if that's what the coder used."
         )
         context2 = [{"id": 2, "agent": "coder", "output": coder_output}]
         print(f"  [Step 3] reviewer ← {reviewer_subtask[:60]}…")
@@ -217,6 +351,7 @@ def run_instance(
     config: dict | None = None,
     bypass_conductor: bool = True,
     use_repo_context: bool = True,
+    exec_repair: bool = False,
 ) -> dict:
     """Run the pipeline on one SWE-Bench instance. Returns a prediction dict."""
     iid = instance["instance_id"]
@@ -224,7 +359,7 @@ def run_instance(
     t0 = time.time()
     try:
         if bypass_conductor and config is not None:
-            result = run_fixed_workflow(instance, config, use_repo_context=use_repo_context)
+            result = run_fixed_workflow(instance, config, use_repo_context=use_repo_context, exec_repair=exec_repair)
         else:
             assert pipeline is not None
             query = format_query(instance)
@@ -233,7 +368,48 @@ def run_instance(
 
         elapsed = time.time() - t0
         all_output = "\n\n".join(s.output for s in result.step_results)
-        patch = extract(all_output)
+
+        # Try SEARCH/REPLACE → difflib first, fall back to direct diff extraction
+        from eval.patch_utils import model_output_to_diff
+        from eval.repo_context import (
+            paths_from_tests, get_repo_at_commit, extract_file_paths,
+        )
+        repo_dir = None
+        file_paths: list[str] = []
+        try:
+            base_commit = instance.get("base_commit", "")
+            repo = instance.get("repo", "")
+            pkg_name = repo.split("/")[-1].replace("-", "_") if repo else ""
+            if base_commit and repo:
+                repo_dir = get_repo_at_commit(repo, base_commit)
+                # Use same merged strategy as run_fixed_workflow
+                test_paths = paths_from_tests(instance, repo_dir)
+                planner_output = next(
+                    (s.output for s in result.step_results if s.agent == "planner"), ""
+                )
+                planner_paths = extract_file_paths(
+                    planner_output, repo_dir, pkg_name, debug=False
+                ) if planner_output else []
+                seen_p: set[str] = set()
+                for p in test_paths + planner_paths:
+                    if p not in seen_p:
+                        seen_p.add(p)
+                        file_paths.append(p)
+                file_paths = file_paths[:6]
+        except Exception:
+            pass
+        # v2 (2026-06-23): prefer the validated patch computed inside
+        # run_fixed_workflow's verify-and-retry loop.
+        patch = ""
+        for _s in result.step_results:
+            if getattr(_s, "agent", "") == "__patch__":
+                patch = _s.output or ""
+                break
+        if not patch and repo_dir is not None:
+            # conductor/pipeline path: build a VALIDATED diff from SEARCH/REPLACE.
+            patch = model_output_to_diff(all_output, repo_dir, file_paths)
+        # NOTE: the raw extract() fallback is intentionally removed — an
+        # unvalidated hand-written diff can corrupt files (see patch_utils v2).
 
         # Save per-instance log
         _save_instance_log(
@@ -290,8 +466,8 @@ def _save_instance_log(
         ],
     }
     (out_dir / "log.json").write_text(_json.dumps(log, ensure_ascii=False, indent=2))
-    if patch:
-        (out_dir / "patch.diff").write_text(patch)
+    # Always write patch.diff (empty string if no patch) so stale files don't mislead
+    (out_dir / "patch.diff").write_text(patch or "")
 
 
 # ── Scoring ───────────────────────────────────────────────────────────────────
@@ -366,6 +542,15 @@ def main() -> None:
         "--no-clone", action="store_true",
         help="Skip repo cloning — model infers file paths from training data (faster but less accurate)"
     )
+    parser.add_argument(
+        "--exec-repair", action="store_true",
+        help="Execution-guided repair: run failing tests on each candidate and "
+             "feed the traceback back to the coder (needs SWE-bench Docker; slow)"
+    )
+    parser.add_argument(
+        "--instances", default=None,
+        help="Comma-separated instance IDs to run (e.g. astropy__astropy-12907,django__django-13033)"
+    )
     args = parser.parse_args()
 
     if args.stats_only:
@@ -387,9 +572,12 @@ def main() -> None:
         done_ids = load_existing_ids(args.output)
         print(f"  Resuming: {len(done_ids)} already done")
 
-    # Apply limit
+    # Filter by --instances if specified
     to_run = [i for i in instances if i["instance_id"] not in done_ids]
-    if args.limit:
+    if args.instances:
+        requested = set(x.strip() for x in args.instances.split(",") if x.strip())
+        to_run = [i for i in to_run if i["instance_id"] in requested]
+    elif args.limit:
         to_run = to_run[: args.limit]
     print(f"  Running: {len(to_run)} instances\n")
 
@@ -411,7 +599,8 @@ def main() -> None:
     Path(args.output).parent.mkdir(parents=True, exist_ok=True)
     t_start = time.perf_counter()
 
-    with open(args.output, "a") as out_f:
+    file_mode = "a" if args.resume else "w"  # overwrite by default, append only on --resume
+    with open(args.output, file_mode) as out_f:
         for idx, instance in enumerate(to_run, 1):
             iid = instance["instance_id"]
             print(f"[{idx}/{len(to_run)}] {iid}")
@@ -424,6 +613,7 @@ def main() -> None:
                 config=config,
                 bypass_conductor=bypass_conductor,
                 use_repo_context=use_repo_context,
+                exec_repair=args.exec_repair,
             )
             out_f.write(json.dumps(pred, ensure_ascii=False) + "\n")
             out_f.flush()

@@ -15,17 +15,29 @@ _FENCE_RE = re.compile(r"```diff\s*([\s\S]+?)\s*```", re.IGNORECASE)
 _DIFF_START_RE = re.compile(r"(diff --git .+|--- a/.+)", re.MULTILINE)
 
 
+def _only_tests(patch: str) -> bool:
+    """True if every modified file in the patch is a test file."""
+    files = re.findall(r"^\+\+\+ b/(.+)$", patch, re.MULTILINE)
+    if not files:
+        return False
+    return all("/tests/" in f or f.endswith("_test.py") or "/test_" in f for f in files)
+
+
 def extract(text: str) -> str:
     """Return the patch string, or '' if none found."""
     # Strategy 1: fenced block
     m = _FENCE_RE.search(text)
     if m:
-        return m.group(1).strip()
+        candidate = m.group(1).strip()
+        if not _only_tests(candidate):
+            return candidate
 
     # Strategy 2: bare diff starting with known headers
     m2 = _DIFF_START_RE.search(text)
     if m2:
-        return text[m2.start():].strip()
+        candidate = text[m2.start():].strip()
+        if not _only_tests(candidate):
+            return candidate
 
     return ""
 

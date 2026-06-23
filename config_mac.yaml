@@ -1,0 +1,39 @@
+# local-fugu — Mac / Apple Silicon configuration
+# Hardware: Mac (Apple Silicon, unified memory)
+#
+# VRAM: Apple Silicon uses unified memory — no hard limit.
+# nvfp4 = MLX-optimized, fastest on Apple Silicon.
+#
+# ── Model options (uncomment to switch) ──────────────────────────────────────
+#
+# Option A: High quality (recommended — same as NucBox)
+#   coder: qwen3.6:27b-coding-nvfp4   19GB MLX — fastest on Mac, same model as NucBox target
+#
+# Option B: Highest quality coding model
+#   coder: qwen3-coder:30b            18GB — code-specific 30B
+#
+# Option C: Fast smoke test
+#   coder: qwen2.5-coder:14b          9GB  — quick iteration
+
+backend: ollama
+
+ollama:
+  base_url: "http://localhost:11434/v1"
+  api_key: "ollama"
+
+vllm:
+  base_url: "http://localhost:8000/v1"
+  api_key: "vllm"
+
+agents:
+  conductor: "qwen2.5-coder:7b"           #  4.7 GB — lightweight
+  coder:     "qwen3-coder:30b"   # 19.0 GB — MLX最適化、Mac最速
+  reviewer:  "qwen2.5-coder:7b"           #  4.7 GB — lightweight
+  planner:   "qwen2.5-coder:7b"           #  4.7 GB — lightweight
+
+pipeline:
+  max_parallel_steps: 1       # Mac: sequential (unified memory管理)
+  temperature:
+    conductor: 0.4
+    default:   0.2
+  timeout_seconds: 600

@@ -1,0 +1,33 @@
+--- a/astropy/timeseries/sampled.py
++++ b/astropy/timeseries/sampled.py
+@@ -81,11 +81,13 @@
+             else:
+                 n_samples = len(self)
+ 
+-        if 'time' in self.colnames:
+-            if time is None:
+-                time = self.columns['time']
+-            else:
+-                raise TypeError("'time' has been given both in the table and as a keyword argument")
++        for col in self._required_columns:
++            if col in self.colnames:
++                if time is None:
++                    time = self.columns[col]
++                else:
++                    raise TypeError(f"'{col}' has been given both in the table and as a keyword argument")
++                break
+ 
+         if time is None and time_start is None:
+             raise TypeError("Either 'time' or 'time_start' should be specified")
+@@ -130,8 +132,9 @@
+                             "'time' is an array")
+ 
+         with self._delay_required_column_checks():
+-            if 'time' in self.colnames:
+-                self.remove_column('time')
++            for col in self._required_columns:
++                if col in self.colnames:
++                    self.remove_column(col)
+             self.add_column(time, index=0, name='time')
+ 
+     @property

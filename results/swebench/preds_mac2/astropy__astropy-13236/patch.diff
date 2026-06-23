@@ -1,0 +1,35 @@
+diff --git a/astropy/table/mixin.py b/astropy/table/mixin.py
+--- a/astropy/table/mixin.py
++++ b/astropy/table/mixin.py
+@@ -10,7 +10,6 @@
+ from astropy.table.column import Column
+ from astropy.table.utils import _is_column_like
+ 
+-# Structured ndarray gets viewed as a mixin unless already a valid mixin class
+ def add_column(table, data=None, name=None, index=None, copy=True):
+     """
+     Add a column to the table.
+@@ -20,13 +19,6 @@ def add_column(table, data=None, name=None, index=None, copy=True):
+         data = np.array(data)
+ 
+     if isinstance(data, Column) or data_is_mixin:
+-        # Structured ndarray gets viewed as a mixin unless already a valid
+-        # mixin class
+-        if (not isinstance(data, Column) and not data_is_mixin
+-                and isinstance(data, np.ndarray) and len(data.dtype) > 1):
+-            data = data.view(NdarrayMixin)
+-            data_is_mixin = True
+-
+         table._add_column(Column(data=data, name=name, copy=copy), index=index)
+     else:
+         raise TypeError("data must be a Column or an array-like object")
+diff --git a/astropy/table/tests/test_table.py b/astropy/table/tests/test_table.py
+--- a/astropy/table/tests/test_table.py
++++ b/astropy/table/tests/test_table.py
+@@ -123,7 +123,6 @@ def test_structured_masked_column():
+     table = Table()
+     data = np.array([(1, 2), (3, 4)], dtype=[('a', 'i8'), ('b', 'f8')])
+     with pytest.warns(FutureWarning):
+-        table.add_column(data)
+         assert isinstance(table['a'], Column)
+         assert isinstance(table['b'], Column)

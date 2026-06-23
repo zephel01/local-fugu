@@ -1,0 +1,20 @@
+--- a/astropy/table/column.py
++++ b/astropy/table/column.py
+@@ -1172,6 +1172,17 @@
+         if isinstance(data, MaskedColumn) and np.any(data.mask):
+             raise TypeError("Cannot convert a MaskedColumn with masked value to a Column")
+ 
++        # Issue warning for structured arrays that will be converted to NdarrayMixin
++        import warnings
++        if (isinstance(data, np.ndarray) and len(data.dtype) > 1 
++                and not isinstance(data, NdarrayMixin)):
++            warnings.warn(
++                "Structured arrays will no longer be automatically converted to "
++                "NdarrayMixin in the future. Please explicitly convert to "
++                "NdarrayMixin if this behavior is desired.",
++                FutureWarning,
++                stacklevel=2)
++
+         self = super().__new__(
+             cls, data=data, name=name, dtype=dtype, shape=shape, length=length,
+             description=description, unit=unit, format=format, meta=meta,

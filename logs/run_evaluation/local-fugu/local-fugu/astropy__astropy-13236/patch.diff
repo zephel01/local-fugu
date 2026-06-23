@@ -1,0 +1,11 @@
+--- a/astropy/table/tests/test_mixin.py
++++ b/astropy/table/tests/test_mixin.py
+@@ -22,6 +22,8 @@
+ from astropy.table import table_helpers
+ from astropy.utils.exceptions import AstropyUserWarning
+ from astropy.utils.metadata import MergeConflictWarning
++import warnings
++
+ from astropy.coordinates.tests.test_representation import representation_equal
+ from astropy.coordinates.tests.helper import skycoord_equal
+ 

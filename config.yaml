@@ -39,7 +39,7 @@ vllm:
 #     → safe only if coder is fully unloaded first
 agents:
   conductor: "qwen2.5-coder:7b"   #  8 GB GPU — planner (same model as reviewer → shared)
-  coder:     "qwen3.6:27b"        # 24 GB GPU — 77.2% SWE-bench Verified
+  coder:     "qwen3-coder:30b"        # 24 GB GPU — 77.2% SWE-bench Verified
   reviewer:  "qwen2.5-coder:7b"   #  8 GB GPU — fits alongside coder (32 GB total)
   planner:   "qwen2.5-coder:7b"   #  8 GB GPU — same model as conductor/reviewer (shared in VRAM)
 
@@ -48,4 +48,4 @@ pipeline:
   temperature:
     conductor: 0.4
     default:   0.2
-  timeout_seconds: 240
+  timeout_seconds: 600

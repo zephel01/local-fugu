@@ -1,0 +1,24 @@
+--- a/astropy/table/column.py
++++ b/astropy/table/column.py
+@@ -100,14 +100,6 @@ class Column:
+     def __new__(cls, data=None, name=None, dtype=None, shape=None,
+                 format=None, description=None, unit=None, meta=None,
+                 copy=True, copy_data=True):
+-        # Structured ndarray gets viewed as a mixin unless already a valid
+-        # mixin class
+-        if (not isinstance(data, Column) and not data_is_mixin
+-                and isinstance(data, np.ndarray) and len(data.dtype) > 1):
+-            data = data.view(NdarrayMixin)
+-            data_is_mixin = True
+-
+         if copy_data:
+             data = np.array(data, copy=True)
+ 
+@@ -200,6 +192,7 @@ class Column:
+                 description=description, unit=unit, meta=meta,
+                 copy=False, copy_data=False)
+ 
++        warnings.warn("Structured arrays will be added as Columns in future versions. Wrap data in Column for compatibility.", FutureWarning, stacklevel=2)
+         return column
+ 
+     @classmethod
