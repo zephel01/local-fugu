@@ -36,24 +36,36 @@ class ConductorAgent:
             f"## Available Agents\n{agent_list}\n<!-- (auto-injected from config) -->\n",
         )
 
-    def plan(self, user_query: str) -> dict[str, Any]:
+    def plan(self, user_query: str, max_attempts: int = 3) -> dict[str, Any]:
         """Return a workflow dict: {goal, workflow: [{id, agent, subtask, access_list}]}"""
+        import time as _time
+
         extra: dict = {}
         if self.config.get("backend") == "ollama":
             extra["keep_alive"] = 0
 
-        resp = self.client.chat.completions.create(
-            model=self.model,
-            messages=[
-                {"role": "system", "content": self.system_prompt},
-                {"role": "user", "content": user_query},
-            ],
-            temperature=self.temperature,
-            timeout=self.timeout,
-            extra_body=extra or None,
-        )
-        raw = resp.choices[0].message.content or ""
-        return self._parse_json(raw)
+        last_err: Exception | None = None
+        for attempt in range(1, max_attempts + 1):
+            resp = self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": self.system_prompt},
+                    {"role": "user", "content": user_query},
+                ],
+                temperature=self.temperature,
+                timeout=self.timeout,
+                extra_body=extra or None,
+            )
+            raw = resp.choices[0].message.content or ""
+            try:
+                return self._parse_json(raw)
+            except Exception as e:
+                last_err = e
+                if attempt < max_attempts:
+                    wait = 10 * attempt
+                    print(f"  [Conductor] JSON parse failed (attempt {attempt}), retrying in {wait}s…")
+                    _time.sleep(wait)
+        raise RuntimeError(f"Conductor failed after {max_attempts} attempts: {last_err}")
 
     @staticmethod
     def _parse_json(text: str) -> dict[str, Any]:
