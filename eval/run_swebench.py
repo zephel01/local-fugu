@@ -155,12 +155,19 @@ def score_predictions(predictions_path: str) -> None:
     swe_eval(
         dataset_name="princeton-nlp/SWE-bench_Verified",
         split="test",
+        instance_ids=[],
         predictions_path=predictions_path,
         max_workers=4,
-        cache_level="instance",
+        force_rebuild=False,
+        cache_level="env",
         clean=False,
-        open_file_flag=False,
+        open_file_limit=4096,
         run_id="local-fugu",
+        timeout=1800,
+        namespace="swebench",
+        rewrite_reports=False,
+        modal=False,
+        report_dir="results/swebench_reports",
     )
 
 
