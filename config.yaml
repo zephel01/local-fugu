@@ -41,7 +41,7 @@ agents:
   conductor: "qwen2.5-coder:7b"   #  8 GB GPU — planner (same model as reviewer → shared)
   coder:     "qwen3.6:27b"        # 24 GB GPU — 77.2% SWE-bench Verified
   reviewer:  "qwen2.5-coder:7b"   #  8 GB GPU — fits alongside coder (32 GB total)
-  planner:   "gemma4:e2b"         #  7 GB GPU — ultra-light decomposer
+  planner:   "qwen2.5-coder:7b"   #  8 GB GPU — same model as conductor/reviewer (shared in VRAM)
 
 pipeline:
   max_parallel_steps: 2       # coder(24GB) + reviewer(8GB) = 32GB; at VRAM limit
