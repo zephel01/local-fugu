@@ -12,45 +12,39 @@ vllm:
   api_key: "vllm"
 
 # ── Agent pool ────────────────────────────────────────────────────────────────
-# RTX 5090 32 GB optimized — all models either already downloaded or noted below.
-# Models load/unload dynamically via Ollama; VRAM does not stack for sequential steps.
+# Hardware: NucBox EVO X2 / RTX 5090 32GB VRAM / 62GB RAM
 #
-# Role          Model                          VRAM   SWE-bench  Notes
-# ──────────────────────────────────────────────────────────────────────────────
-# conductor     qwen3.5:9b                     6.6 GB  —          lightweight planner (already downloaded)
-# coder         qwen3.6:27b-coding-nvfp4      19 GB   77.2%      ★ BEST for SWE-bench on 5090
-#                                                                  native Blackwell FP4, 262K ctx
-#                                                                  (already downloaded)
-# reviewer      qwen2.5-coder:14b              9 GB   —          code-understanding specialist (already downloaded)
-# planner       qwen3.5:4b                     3.4 GB  —          ultra-light decomposer (already downloaded)
+# VRAM budget (32607 MiB):
+#   coder (qwen3.6:27b)       → 24 GB on GPU  (measured via nvidia-smi)
+#   others (qwen2.5-coder:7b) →  8 GB on GPU
+#   Max simultaneous           → 32 GB ≈ full VRAM
 #
-# ── Why qwen3.6:27b over qwen3-coder:30b ────────────────────────────────────
-#   qwen3-coder:30b   SWE-bench Verified: ~64%   18 GB
-#   qwen3.6:27b       SWE-bench Verified: 77.2%  17 GB  ← 13pt better, already downloaded
+# Key constraint: conductor/reviewer/planner must ALL fit alongside the coder.
+# conductor=reviewer=qwen2.5-coder:7b → loaded once, shared by both roles.
 #
 # ── Format note ──────────────────────────────────────────────────────────────
 #   nvfp4 variants (e.g. qwen3.6:27b-coding-nvfp4) → Mac / Apple Silicon MLX only
-#   CUDA (Ubuntu / Windows WSL2 / RTX 5090) → use standard Q4_K_M GGUF (no suffix)
+#   CUDA / RTX 5090 → use standard Q4_K_M GGUF (no suffix)
 #
-# ── ⚠️  CUDA version warning ────────────────────────────────────────────────
-#   CUDA 13.2 has a known bug producing gibberish on Qwen 3.6 (as of Apr 2026)
-#   Use CUDA 13.1 or CUDA 12.x — NVIDIA is working on a fix
+# ── ⚠️  CUDA 13.2 bug ────────────────────────────────────────────────────────
+#   Produces gibberish on Qwen 3.6 with CUDA 13.2. Use 13.1 or 12.x.
+#   Current: CUDA 13.3 (from nvidia-smi) → OK
 #
-# ── Alternatives / experiments ───────────────────────────────────────────────
-#   coder (quality upgrade): pull qwen3.6:27b-q6_k  (~22.5 GB, fits 32 GB, ~50 tok/s)
-#   coder (speed):           qwen3.6:35b-a3b-q4_K_M (MoE 3B active, 198 tok/s)
-#   coder (Mac):             qwen3.6:27b-coding-nvfp4 (MLX format)
-#   coder (fallback):        qwen3-coder:30b (64% SWE-bench, CUDA safe)
-#   reviewer (upgrade):      devstral-small-2:24b-instruct-2512-q4_K_M
-#     → ollama pull devstral-small-2:24b-instruct-2512-q4_K_M
+# ── Upgrade paths ────────────────────────────────────────────────────────────
+#   coder upgrade : qwen3.6:27b-q6_k  (~22.5 GB, higher quality, still fits)
+#   coder speed   : qwen3.6:35b-a3b   (MoE, only 3B active → fast, already downloaded)
+#   reviewer upgrade (after coder unloads):
+#     devstral-small-2:24b-instruct-2512-q4_K_M  (14 GB)
+#     → needs keep_alive=0 to fully work; coder(24GB)+devstral(14GB)=38GB > 32GB
+#     → safe only if coder is fully unloaded first
 agents:
-  conductor: "qwen2.5-coder:7b"                          # 4.7 GB — lightweight planner
-  coder:     "qwen3.6:27b"                               # 17 GB  — 77.2% SWE-bench
-  reviewer:  "devstral-small-2:24b-instruct-2512-q4_K_M" # 14 GB  — purpose-built coding agent
-  planner:   "gemma4:e2b"                                # 7.2 GB — ultra-light decomposer
+  conductor: "qwen2.5-coder:7b"   #  8 GB GPU — planner (same model as reviewer → shared)
+  coder:     "qwen3.6:27b"        # 24 GB GPU — 77.2% SWE-bench Verified
+  reviewer:  "qwen2.5-coder:7b"   #  8 GB GPU — fits alongside coder (32 GB total)
+  planner:   "gemma4:e2b"         #  7 GB GPU — ultra-light decomposer
 
 pipeline:
-  max_parallel_steps: 2       # coder(19GB) + reviewer(9GB) = 28GB; safe within 32GB
+  max_parallel_steps: 2       # coder(24GB) + reviewer(8GB) = 32GB; at VRAM limit
   temperature:
     conductor: 0.4
     default:   0.2

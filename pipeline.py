@@ -131,7 +131,7 @@ class WorkflowExecutor:
                 except Exception as e:
                     if attempt == max_attempts:
                         raise
-                    wait = 10 * attempt
+                    wait = 20 * attempt  # 20s, 40s — give Ollama time to unload
                     print(f"  [Step {step_id}] attempt {attempt} failed ({e.__class__.__name__}), "
                           f"retrying in {wait}s…")
                     await asyncio.sleep(wait)
