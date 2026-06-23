@@ -15,9 +15,12 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import re
 import sys
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from agents.base import load_config
@@ -187,6 +190,104 @@ class FuguPipeline:
         	print(f"  Step {step['id']:2d} [{step['agent']:10s}]{dep_str}: {step['subtask'][:55]}…")
 
 
+# ── Result logger ─────────────────────────────────────────────────────────────
+
+def _slug(text: str, max_len: int = 40) -> str:
+    """Convert query text to a safe filename slug."""
+    s = re.sub(r"[^a-zA-Z0-9]+", "_", text.lower()).strip("_")
+    return s[:max_len]
+
+
+def save_result(
+    query: str,
+    result: WorkflowResult,
+    elapsed: float,
+    config: dict[str, Any],
+    log_dir: str = "results",
+) -> Path:
+    """
+    Save a full run log to results/<YYYYMMDD_HHMMSS>_<slug>/
+
+    Directory layout:
+        results/
+          20260623_093000_implement_a_thread/
+            run.json        ← full structured log (machine-readable)
+            summary.md      ← human-readable summary
+            step_01_coder.txt
+            step_02_reviewer.txt
+            ...
+    """
+    ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    run_dir = Path(log_dir) / f"{ts}_{_slug(query)}"
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    # ── run.json ──
+    run_data = {
+        "timestamp": ts,
+        "query": query,
+        "goal": result.goal,
+        "elapsed_s": round(elapsed, 2),
+        "config": {
+            "backend": config.get("backend"),
+            "agents": config.get("agents", {}),
+        },
+        "steps": [
+            {
+                "id": s.id,
+                "agent": s.agent,
+                "subtask": s.subtask,
+                "duration_s": round(s.duration_s, 2),
+                "output": s.output,
+            }
+            for s in result.step_results
+        ],
+    }
+    (run_dir / "run.json").write_text(
+        json.dumps(run_data, ensure_ascii=False, indent=2)
+    )
+
+    # ── per-step txt files ──
+    for s in result.step_results:
+        fname = f"step_{s.id:02d}_{s.agent}.txt"
+        (run_dir / fname).write_text(
+            f"# Step {s.id} [{s.agent}] ({s.duration_s:.1f}s)\n"
+            f"# Subtask: {s.subtask}\n\n"
+            f"{s.output}\n"
+        )
+
+    # ── summary.md ──
+    verdicts = []
+    for s in result.step_results:
+        if s.agent == "reviewer":
+            m = re.search(r'"verdict"\s*:\s*"(\w+)"', s.output)
+            verdicts.append(m.group(1) if m else "?")
+
+    lines = [
+        f"# Run: {ts}",
+        f"",
+        f"**Query**: {query}",
+        f"**Goal**: {result.goal}",
+        f"**Total time**: {elapsed:.1f}s",
+        f"**Steps**: {len(result.step_results)}",
+        f"**Reviewer verdicts**: {', '.join(verdicts) if verdicts else '—'}",
+        f"",
+        f"## Steps",
+        f"",
+    ]
+    for s in result.step_results:
+        lines.append(f"### Step {s.id} [{s.agent}] ({s.duration_s:.1f}s)")
+        lines.append(f"*{s.subtask[:100]}*")
+        lines.append(f"")
+        # First 20 lines of output
+        preview = "\n".join(s.output.splitlines()[:20])
+        lines.append(f"```\n{preview}\n```")
+        lines.append(f"")
+
+    (run_dir / "summary.md").write_text("\n".join(lines))
+
+    return run_dir
+
+
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
 def main() -> None:
@@ -194,6 +295,8 @@ def main() -> None:
     parser.add_argument("query", nargs="+", help="Programming task description")
     parser.add_argument("--config", default="config.yaml")
     parser.add_argument("--output", help="Save all step outputs to this file")
+    parser.add_argument("--log-dir", default="results", help="Directory for run logs (default: results/)")
+    parser.add_argument("--no-log", action="store_true", help="Disable automatic result logging")
     parser.add_argument("--json", action="store_true", help="Print result as JSON")
     args = parser.parse_args()
 
@@ -235,6 +338,10 @@ def main() -> None:
                 f.write(s.output)
                 f.write("\n\n")
         print(f"\nSaved to {args.output}")
+
+    if not args.no_log:
+        run_dir = save_result(query, result, elapsed, pipeline.config, args.log_dir)
+        print(f"Log saved → {run_dir}/")
 
 
 if __name__ == "__main__":

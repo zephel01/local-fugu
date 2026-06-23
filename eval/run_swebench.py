@@ -28,6 +28,7 @@ import os
 import sys
 import time
 from pathlib import Path
+from typing import Any
 
 # Add repo root to path so we can import pipeline
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -64,19 +65,30 @@ def load_existing_ids(path: str) -> set[str]:
     return ids
 
 
-def run_instance(pipeline: FuguPipeline, instance: dict) -> dict:
+def run_instance(pipeline: FuguPipeline, instance: dict, log_dir: str = "results/swebench") -> dict:
     """Run the pipeline on one SWE-Bench instance. Returns a prediction dict."""
     iid = instance["instance_id"]
     query = format_query(instance)
     hint = format_conductor_hint(instance)
     full_query = f"{hint}\n\n{query}"
 
+    t0 = time.time()
     try:
         result = pipeline.run(full_query)
-        # Collect all step outputs and search for a patch
+        elapsed = time.time() - t0
         all_output = "\n\n".join(s.output for s in result.step_results)
         patch = extract(all_output)
+
+        # Save per-instance log
+        _save_instance_log(
+            log_dir=log_dir,
+            instance=instance,
+            result=result,
+            patch=patch,
+            elapsed=elapsed,
+        )
     except Exception as e:
+        elapsed = time.time() - t0
         print(f"  [ERROR] {iid}: {e}")
         patch = ""
 
@@ -86,6 +98,44 @@ def run_instance(pipeline: FuguPipeline, instance: dict) -> dict:
         "model_name_or_path": "local-fugu",
         "patch_valid": is_valid_patch(patch),
     }
+
+
+def _save_instance_log(
+    log_dir: str,
+    instance: dict,
+    result: Any,
+    patch: str,
+    elapsed: float,
+) -> None:
+    """Save a structured log for one SWE-bench instance."""
+    import json as _json
+    from datetime import datetime, timezone
+
+    iid = instance["instance_id"]
+    out_dir = Path(log_dir) / iid
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    log = {
+        "instance_id": iid,
+        "repo": instance.get("repo", ""),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "elapsed_s": round(elapsed, 2),
+        "patch_valid": is_valid_patch(patch),
+        "patch": patch,
+        "steps": [
+            {
+                "id": s.id,
+                "agent": s.agent,
+                "subtask": s.subtask,
+                "duration_s": round(s.duration_s, 2),
+                "output": s.output,
+            }
+            for s in result.step_results
+        ],
+    }
+    (out_dir / "log.json").write_text(_json.dumps(log, ensure_ascii=False, indent=2))
+    if patch:
+        (out_dir / "patch.diff").write_text(patch)
 
 
 # ── Scoring ───────────────────────────────────────────────────────────────────
@@ -185,7 +235,7 @@ def main() -> None:
             print(f"[{idx}/{len(to_run)}] {iid}")
             t0 = time.perf_counter()
 
-            pred = run_instance(pipeline, instance)
+            pred = run_instance(pipeline, instance, log_dir=f"results/swebench/{Path(args.output).stem}")
             out_f.write(json.dumps(pred, ensure_ascii=False) + "\n")
             out_f.flush()
 
