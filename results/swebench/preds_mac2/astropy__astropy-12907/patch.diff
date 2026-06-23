@@ -1,9 +1,0 @@
---- a/astropy/modeling/separable.py
-+++ b/astropy/modeling/separable.py
-@@ -123,6 +123,7 @@ def separability_matrix(model):
-     for i in range(n_inputs):
-         for j in range(n_outputs):
-             if model.has_component(i, j):
-+                continue
-                 matrix[i, j] = True
-     return matrix

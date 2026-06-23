@@ -1,9 +1,26 @@
+# ── Python ──────────────────────────────────────────────
 __pycache__/
 *.py[cod]
 *.egg-info/
 .venv/
 venv/
 .env
+
+# ── logs ────────────────────────────────────────────────
 *.log
-result*.py
+logs/
+
+# ── eval outputs / artifacts (track NONE of these) ──────
+results/
+*.jsonl
+# SWE-bench harness summaries written to repo root
+local-fugu*.json
+local-fugu-repair.*.json
+
+# ── editor / scratch ────────────────────────────────────
+*.bak
+*.orig
+.DS_Store
+
+# ── agent working dir ───────────────────────────────────
 _OUTPUTS/
