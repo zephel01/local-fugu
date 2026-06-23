@@ -33,7 +33,7 @@ from typing import Any
 # Add repo root to path so we can import pipeline
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from pipeline import FuguPipeline, WorkflowExecutor, WorkflowResult
+from pipeline import FuguPipeline, WorkflowResult, StepResult
 from agents.base import load_config
 from agents import build_pool
 from eval.swe_prompt import format_query, format_conductor_hint
@@ -42,67 +42,145 @@ from eval.extract_patch import extract, is_valid_patch
 
 # ── Fixed SWE-bench workflow (bypasses Conductor) ─────────────────────────────
 
-def run_fixed_workflow(instance: dict, config: dict) -> WorkflowResult:
+def run_fixed_workflow(
+    instance: dict,
+    config: dict,
+    use_repo_context: bool = True,
+) -> WorkflowResult:
     """
-    Run a hardcoded planner→coder→reviewer workflow without calling the Conductor.
-    This is more reliable for SWE-bench because:
-    - The workflow is always the same (no need for dynamic planning)
-    - Avoids Conductor failures on long problem statements
-    - Saves ~1-5min per instance on conductor retries
+    Run planner→coder→reviewer without the Conductor.
+
+    With use_repo_context=True (default):
+      - Clones the repo at base_commit (cached in /tmp/local_fugu_*)
+      - Passes file tree to planner; actual file content to coder
+      - Dramatically improves diff correctness (real line numbers & context)
+
+    With use_repo_context=False:
+      - Falls back to asking the model to recall file paths from training data
     """
     import asyncio
 
     query = format_query(instance)
     repo = instance.get("repo", "unknown")
+    base_commit = instance.get("base_commit", "")
+    pkg_name = repo.split("/")[-1].replace("-", "_")
+    iid = instance.get("instance_id", "unknown")
 
-    fixed_workflow = [
-        {
-            "id": 1,
-            "agent": "planner",
-            "subtask": (
+    pool = build_pool(config)
+
+    async def _run() -> list[StepResult]:
+        steps: list[StepResult] = []
+
+        # ── Repo context (optional) ───────────────────────────────────────────
+        repo_dir = None
+        file_tree = ""
+        if use_repo_context and base_commit:
+            try:
+                from eval.repo_context import (
+                    get_repo_at_commit, get_file_tree,
+                    extract_file_paths, read_files,
+                )
+                repo_dir = get_repo_at_commit(repo, base_commit)
+                file_tree = get_file_tree(repo_dir, pkg_name)
+            except Exception as e:
+                print(f"  [repo] Clone/checkout failed: {e} — falling back to no-context", flush=True)
+                repo_dir = None
+                file_tree = ""
+
+        # ── Step 1: Planner ───────────────────────────────────────────────────
+        if file_tree:
+            planner_subtask = (
                 f"You are working on the {repo} repository.\n\n"
-                "Your job: carefully read the issue below and identify:\n"
-                "1. The exact file path(s) in the repository that need to be changed\n"
+                f"## Available Python files\n{file_tree}\n\n"
+                "## Your task\n"
+                "Read the issue below and identify:\n"
+                "1. The EXACT file path(s) from the list above that need to be changed\n"
                 "2. The root cause of the bug\n"
                 "3. The minimal change needed\n\n"
-                "Be specific about file paths — they will be used to generate a git patch.\n\n"
+                "List the file path(s) explicitly — they will be used to read the actual code.\n\n"
                 f"{query}"
-            ),
-            "access_list": [],
-        },
-        {
-            "id": 2,
-            "agent": "coder",
-            "subtask": (
-                "Using the file paths and analysis from the planner, implement the fix "
-                "as a valid unified diff (git patch).\n\n"
-                "STRICT requirements:\n"
-                "- Use REAL file paths from the planner (never placeholders like 'path/to/file')\n"
-                "- Format: `--- a/actual/path.py` and `+++ b/actual/path.py`\n"
-                "- Include correct @@ line numbers and context lines\n"
-                "- Output ONLY the patch in a ```diff ... ``` block\n\n"
-                f"Original issue for reference:\n{query}"
-            ),
-            "access_list": [1],
-        },
-        {
-            "id": 3,
-            "agent": "reviewer",
-            "subtask": (
-                "Review the patch from the coder. Check:\n"
-                "1. File paths in `--- a/...` and `+++ b/...` are real paths (not placeholders)\n"
-                "2. The patch addresses the root cause described in the issue\n"
-                "3. The diff format is valid (correct @@ headers, context lines)\n\n"
-                "If the patch looks valid, output it unchanged in a ```diff ... ``` block.\n"
-                "If it has placeholder paths, correct them using the planner's file paths."
-            ),
-            "access_list": [2],
-        },
-    ]
+            )
+        else:
+            planner_subtask = (
+                f"You are working on the {repo} repository.\n\n"
+                "Read the issue below and identify:\n"
+                "1. The exact file path(s) that need to be changed\n"
+                "2. The root cause of the bug\n"
+                "3. The minimal change needed\n\n"
+                f"{query}"
+            )
 
-    executor = WorkflowExecutor(config)
-    step_results = asyncio.run(executor.execute(fixed_workflow))
-    return WorkflowResult(goal=f"Fix: {instance.get('instance_id', '')}", step_results=step_results)
+        print(f"  [Step 1] planner ← {planner_subtask[:60]}…")
+        t0 = time.perf_counter()
+        planner_output = await asyncio.get_event_loop().run_in_executor(
+            None, pool["planner"].run, planner_subtask, None
+        )
+        dur1 = time.perf_counter() - t0
+        print(f"  [Step 1] done in {dur1:.1f}s")
+        steps.append(StepResult(id=1, agent="planner", subtask=planner_subtask, output=planner_output, duration_s=dur1))
+
+        # ── Read actual file content ──────────────────────────────────────────
+        file_content_section = ""
+        if repo_dir is not None:
+            try:
+                from eval.repo_context import extract_file_paths, read_files
+                file_paths = extract_file_paths(planner_output, repo_dir, pkg_name)
+                if file_paths:
+                    print(f"  [repo] Reading: {file_paths}")
+                    file_content_section = (
+                        "\n\n## Actual file content from repository\n"
+                        + read_files(repo_dir, file_paths)
+                    )
+                else:
+                    print("  [repo] No matching files found in planner output")
+            except Exception as e:
+                print(f"  [repo] File read failed: {e}")
+
+        # ── Step 2: Coder ─────────────────────────────────────────────────────
+        coder_subtask = (
+            "Using the planner's analysis, implement the fix as a valid unified diff.\n\n"
+            "STRICT requirements:\n"
+            "- Use the EXACT file paths identified by the planner\n"
+            "- `--- a/real/path.py` and `+++ b/real/path.py` (no placeholders)\n"
+            "- Context lines MUST match the actual file content exactly\n"
+            "- @@ line numbers must be correct\n"
+            "- Output ONLY a ```diff ... ``` block\n"
+            + file_content_section
+        )
+
+        context1 = [{"id": 1, "agent": "planner", "output": planner_output}]
+        print(f"  [Step 2] coder ← {coder_subtask[:60]}…")
+        t0 = time.perf_counter()
+        coder_output = await asyncio.get_event_loop().run_in_executor(
+            None, pool["coder"].run, coder_subtask, context1
+        )
+        dur2 = time.perf_counter() - t0
+        print(f"  [Step 2] done in {dur2:.1f}s")
+        steps.append(StepResult(id=2, agent="coder", subtask=coder_subtask, output=coder_output, duration_s=dur2))
+
+        # ── Step 3: Reviewer ──────────────────────────────────────────────────
+        reviewer_subtask = (
+            "Review the patch from the coder:\n"
+            "1. File paths in `--- a/...` headers must be real (not placeholders)\n"
+            "2. The fix must address the root cause\n"
+            "3. Diff format must be valid (correct @@ headers and context lines)\n\n"
+            "Output the verified patch in ```diff ... ``` block. "
+            "If paths look wrong, correct them using the planner's identified paths."
+        )
+        context2 = [{"id": 2, "agent": "coder", "output": coder_output}]
+        print(f"  [Step 3] reviewer ← {reviewer_subtask[:60]}…")
+        t0 = time.perf_counter()
+        reviewer_output = await asyncio.get_event_loop().run_in_executor(
+            None, pool["reviewer"].run, reviewer_subtask, context2
+        )
+        dur3 = time.perf_counter() - t0
+        print(f"  [Step 3] done in {dur3:.1f}s")
+        steps.append(StepResult(id=3, agent="reviewer", subtask=reviewer_subtask, output=reviewer_output, duration_s=dur3))
+
+        return steps
+
+    step_results = asyncio.run(_run())
+    return WorkflowResult(goal=f"Fix: {iid}", step_results=step_results)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -138,6 +216,7 @@ def run_instance(
     pipeline: FuguPipeline | None = None,
     config: dict | None = None,
     bypass_conductor: bool = True,
+    use_repo_context: bool = True,
 ) -> dict:
     """Run the pipeline on one SWE-Bench instance. Returns a prediction dict."""
     iid = instance["instance_id"]
@@ -145,7 +224,7 @@ def run_instance(
     t0 = time.time()
     try:
         if bypass_conductor and config is not None:
-            result = run_fixed_workflow(instance, config)
+            result = run_fixed_workflow(instance, config, use_repo_context=use_repo_context)
         else:
             assert pipeline is not None
             query = format_query(instance)
@@ -283,6 +362,10 @@ def main() -> None:
         "--use-conductor", action="store_true",
         help="Use Conductor for dynamic workflow (default: bypass with fixed planner→coder→reviewer)"
     )
+    parser.add_argument(
+        "--no-clone", action="store_true",
+        help="Skip repo cloning — model infers file paths from training data (faster but less accurate)"
+    )
     args = parser.parse_args()
 
     if args.stats_only:
@@ -311,8 +394,11 @@ def main() -> None:
     print(f"  Running: {len(to_run)} instances\n")
 
     bypass_conductor = not args.use_conductor
+    use_repo_context = not args.no_clone
     if bypass_conductor:
-        print("[Mode] Fixed workflow (planner→coder→reviewer) — Conductor bypassed\n")
+        mode = "Fixed workflow (planner→coder→reviewer)"
+        mode += " + repo clone" if use_repo_context else " [no clone]"
+        print(f"[Mode] {mode}\n")
         config = load_config(args.config)
         pipeline = None
     else:
@@ -337,6 +423,7 @@ def main() -> None:
                 pipeline=pipeline,
                 config=config,
                 bypass_conductor=bypass_conductor,
+                use_repo_context=use_repo_context,
             )
             out_f.write(json.dumps(pred, ensure_ascii=False) + "\n")
             out_f.flush()
